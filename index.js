@@ -6,7 +6,7 @@ const https = require('https');
 const http = require('http');
 const morgan = require("morgan");
 const axios = require("axios");
-const request = require('request');
+const requests = require('request');
 const getRawBody = require('raw-body');
 const multipart = require('parse-multipart-data');
 const FormData = require('form-data');
@@ -15,10 +15,11 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
+const Sentry = require('@sentry/node');
 
 const PORT = 443;
 const HOST = "localhost";
-// const API_SERVICE_URL = "https://1e47ae045c9a481da525ee51a8460465@o920931.ingest.sentry.io/4505964430229504";
+// const API_SERVICE_URL = "https://2791fac55c7d0024bbf0b31ecb033eeb@o920931.ingest.sentry.io/4505895396179968";
 const API_SERVER = "https://api-beta.nomercy.ac";
 const SENTRY_PROTOCOL = "https";
 const SENTRY_BASE_URL = "o920931.ingest.sentry.io";
@@ -32,8 +33,7 @@ const SENTRY_PROJECTS = [
 
 const SERVER_OPTIONS = {
 	key: fs.readFileSync('./fixtures/key.pem'),
-	cert: fs.readFileSync('./fixtures/cert.pem'),
-//	ca: fs.readFileSync('./fixtures/ca.pem')
+	cert: fs.readFileSync('./fixtures/cert.pem')
 };
 
 const _isNumeric = (value) => {
@@ -73,11 +73,20 @@ const _getReleaseValueFromSentryBuffer = (buffer) => {
 		return undefined;
 	}
 
-	const releaseID = eventStr.split("release")[1].split("level")[0];
+	let releaseID = eventStr.split("release")[1].split("level")[0];
 	if (releaseID === undefined) {
 		console.log("No release found");
 		return undefined;
 	}
+	console.log("Release: " + releaseID);
+
+	const cleanedStr = releaseID.replace(/[^0-9.]/g, '');
+	if (cleanedStr === undefined) {
+		throw new Error("Release could not be cleaned");
+	} else {
+		releaseID = cleanedStr;
+	}
+	console.log("Cleaned release: " + releaseID);
 
 	return releaseID;
 }
@@ -85,20 +94,54 @@ const _getReleaseValueFromSentryBuffer = (buffer) => {
 const app = express();
 app.use(morgan('dev')); // Get traffic logs
 
+Sentry.init({
+	dsn: "https://4d1f41a1bb21666f16d485330c21c11a@o920931.ingest.sentry.io/4505965966327808",
+	
+	integrations: [
+	  // enable HTTP calls tracing
+	  new Sentry.Integrations.Http({ tracing: true }),
+	  // enable Express.js middleware tracing
+	  new Sentry.Integrations.Express({ app }),
+	],
+  
+	// Set tracesSampleRate to 1.0 to capture 100%
+	// of transactions for performance monitoring.
+	// We recommend adjusting this value in production
+	tracesSampleRate: 1.0,
+  });
+  
+  /*
+// RequestHandler creates a separate execution context using domains, so that every
+// transaction/span/breadcrumb is attached to its own Hub instance
+app.use(Sentry.Handlers.requestHandler());
+// TracingHandler creates a trace for every incoming request
+app.use(Sentry.Handlers.tracingHandler());	
+*/
+// The error handler must be before any other error middleware and after all controllers
+app.use(Sentry.Handlers.errorHandler());
+
+app.get('/operational', (req, res) => {
+	res.writeHead(200);
+	res.end();
+});
+
 app.use((req, res, next) => {
+//	/*
     if (!req.secure) {
-		console.log("Redirecting to https...");
+		console.log("*** Redirecting to https...");
 		return res.redirect(['https://', req.get('Host'), req.url].join(''));
-        // res.redirect(301, `https://${req.hostname}:${PORT}${req.originalUrl}`);
-    }
+	}
+//	*/
     next();
 });
 
 // Do not allow GET requests
 app.get('*', (req, res) => {
+//	/*
 	console.log(`GET request received to: ${req.url}`);
 	res.status(405);
 	res.end();
+//	*/
 });
 
 app.post('*', async (req, res) => {
@@ -120,9 +163,12 @@ app.post('*', async (req, res) => {
 		return _sendStatus(res, 400);
 	}
 
-	if (userAgent.indexOf('sentry.native') <= -1 && userAgent.indexOf('Crashpad') <= -1 && userAgent.indexOf('curl/7.78.0-DEV') <= -1) {
+	if (userAgent.indexOf('sentry.native') <= -1 && userAgent.indexOf('Crashpad') <= -1 &&
+		userAgent.indexOf('curl/7.78.0-DEV') <= -1 && userAgent.indexOf('curl/7.80.0') <= -1) {
 		console.log("User-Agent does not contain sentry.native or Crashpad, blocked!");
-		return _sendStatus(res, 403);
+//		if (userAgent.indexOf('insomnia/2023.4.0') <= -1) {
+			return _sendStatus(res, 402);
+//		}
 	}
 
 	// Extract original body from the request
@@ -137,8 +183,8 @@ app.post('*', async (req, res) => {
 
 			req.body = result;
 		} catch (err) {
-			console.log(`getRawBody error: ${err}`);
-			return _sendStatus(res, 500);
+			throw new Error(`getRawBody error: ${err}`);
+			// return _sendStatus(res, 500);
 		}
 
 		// Decompress gzip body if it is gzip encoded
@@ -150,12 +196,18 @@ app.post('*', async (req, res) => {
 				// fs.writeFileSync(`./temp/original_body.bin`, result);
 				req.body = result;
 			} catch (err) {
-				console.log(`gunzip error: ${err}`);
-				return _sendStatus(res, 500);
+				throw new Error(`gunzip error: ${err}`);
+				// return _sendStatus(res, 500);
 			}
 		}
 	// If the request is a multipart form, extract the original body from the request
-	if (req.headers['content-type'].indexOf('multipart/form-data') > -1) {
+	const contentType = req.headers['content-type'];
+	if (!contentType) {
+		throw new Error("No content-type found");
+		//return _sendStatus(res, 400);
+	}
+
+	if (contentType.indexOf('multipart/form-data') > -1) {
 
 
 		// Parse multipart form data from the request body and craft new one with processed data
@@ -167,14 +219,14 @@ app.post('*', async (req, res) => {
 			console.log("Boundary - "+ boundary);
 	
 			if (boundary === undefined) {
-				console.log("No boundary found");
-				return _sendStatus(res, 500);
+				throw new Error("No boundary found");
+				//return _sendStatus(res, 500);
 			}
 	
 			var form = new FormData();
 			form.setBoundary(boundary);
 
-			console.log("Parsing multipart form data from the request body");
+			console.log(`Parsing multipart form data from the request body with size: ${req.body.length}`);
 	
 			let body = req.body;
 			let parts = multipart.parse(body, boundary);
@@ -205,6 +257,7 @@ app.post('*', async (req, res) => {
 								const tempMinidumpFile = path.join(tempPath, `nm_minidump_file${uuidv4()}`);
 								fs.writeFileSync(tempMinidumpFile, part.data);
 	
+								// TODO: Make a new api endpoint for getting required PE values from pre-registired list, don't get whole file and analyze again and again
 								// Get the original file URL from the API server
 								const original_file = "NoMercy_Module_x86_non_rtti.dll.bak"; // TODO: Find better way to get the original file name
 								const url = `${API_SERVER}/download_client_file?file_name=${original_file}&file_version=${releaseID}&file_branch=release&file_container=ac_files`;
@@ -218,13 +271,13 @@ app.post('*', async (req, res) => {
 										responseType: 'arraybuffer' 
 									});
 								} catch (err) {
-									console.log(`axios error: ${err}`);
 									fs.unlinkSync(tempMinidumpFile);
-									return _sendStatus(res, 500);
+									throw new Error(`axios error: ${err}`);
+									// return _sendStatus(res, 500);
 								}
 								
 								if (response.status !== 200) {
-									console.log(`Could not get original file! response: ${_dumpObject(response)}`);
+									throw new Error(`Could not get original file! response: ${_dumpObject(response)}`);
 								} else {
 									console.log("Original file handled! From: " + response.request.res.responseUrl + " Size: " + response.data.length);
 									let fileContent = Buffer.from(response.data, 'binary');
@@ -237,7 +290,7 @@ app.post('*', async (req, res) => {
 									console.log(`Saved original file to ${tempOrigFile}`);
 	
 									// Run minidump fixer on the temporary file
-									const fixer_command = `./bin/MiniDumpFixer ${tempMinidumpFile} ${tempOrigFile}`;
+									let fixer_command = `./bin/MiniDumpFixer ${tempMinidumpFile} ${tempOrigFile}`;
 									console.log(`Running minidump fixer: ${fixer_command}`);
 	
 									let fixer_output = "";
@@ -247,9 +300,27 @@ app.post('*', async (req, res) => {
 										console.log(`Status Code: ${error.status} with '${error.message}'`);
 										console.log(`stderr: ${error.stderr.toString()}`);
 										console.log(`stdout: ${error.stdout.toString()}`);
+										throw new Error(`Minidump fixer error: ${error.message}`);
 									}
 									console.log(`Minidump fixer output: ${fixer_output}`);
-	
+/*
+									// Run minidump fixer for the client binary
+									{
+										let fixer_command2 = `./bin/MiniDumpFixer ${tempMinidumpFile} ./bin/smt.exe`;
+										console.log(`Running minidump fixer: ${fixer_command2}`);
+		
+										let fixer_output2 = "";
+										try {
+											fixer_output2 = childProc.execSync(fixer_command2).toString();
+										} catch (error) {
+											console.log(`2 Status Code: ${error.status} with '${error.message}'`);
+											console.log(`2 stderr: ${error.stderr.toString()}`);
+											console.log(`2 stdout: ${error.stdout.toString()}`);
+											// throw new Error(`Minidump fixer2 error: ${error.message}`);
+										}
+										console.log(`Minidump fixer2 output: ${fixer_output2}`);
+									}
+	*/
 									// Check if the minidump fixer succeeded
 									if (!fixer_output.includes("successfully been patched")) {
 										console.log("Minidump fixer failed!");
@@ -315,8 +386,8 @@ app.post('*', async (req, res) => {
 			console.log(`Created body size: ${req.body.length}`);
 		}
 		catch (err) {
-			console.log(`multipart create error: ${err}`);
-			return _sendStatus(res, 500);
+			throw new Error(`multipart create error: ${err}`);
+		//	return _sendStatus(res, 500);
 		}
 
 	}
@@ -329,8 +400,8 @@ app.post('*', async (req, res) => {
 				console.log("gzip enc result: " + result.length);
 				req.body = result;
 			} catch (error) {
-				console.log(`gzip error: ${err}`);
-				return _sendStatus(res, 500);
+				throw new Error(`gzip error: ${err}`);
+			//	return _sendStatus(res, 500);
 			}
 		}
 	console.log("----------------------------------------------------");
@@ -340,15 +411,15 @@ app.post('*', async (req, res) => {
 		const projectId = req.path.substring(1);
 		console.log(`projectId: ${projectId}`);
 		if (!_isNumeric(projectId)) {
-			console.log("Invalid projectId");
+			console.log(`Invalid projectId 1: ${projectId}`);
 			return _sendStatus(res, 400);
 		}
 
 		const project = SENTRY_PROJECTS.find(p => p.id == projectId);
 		console.log(`project: ${_dumpObject(project)}`);
 		if (!project) {
-			console.log("Invalid projectId");
-			return _sendStatus(res, 400);
+			throw new Error(`Invalid projectId 2: ${projectId}`);
+			//return _sendStatus(res, 400);
 		}
 
 		targeturl = `${SENTRY_PROTOCOL}://${project.key}@${SENTRY_BASE_URL}${req.path}`;
@@ -356,15 +427,15 @@ app.post('*', async (req, res) => {
 		const projectId = req.path.substring(5).split("/")[0];
 		console.log(`projectId: ${projectId}`);
 		if (!_isNumeric(projectId)) {
-			console.log("Invalid projectId");
-			return _sendStatus(res, 400);
+			throw new Error(`Invalid projectId 3: ${projectId}`);
+			//return _sendStatus(res, 400);
 		}
 
 		const project = SENTRY_PROJECTS.find(p => p.id == projectId);
 		console.log(`project: ${_dumpObject(project)}`);
 		if (!project) {
-			console.log("Invalid projectId");
-			return _sendStatus(res, 400);
+			throw new Error(`Invalid projectId 4: ${projectId}`);
+			// return _sendStatus(res, 400);
 		}
 
 		// Check x-sentry-auth header is exist and contains the correct project key
@@ -374,27 +445,28 @@ app.post('*', async (req, res) => {
 			targeturl = `${SENTRY_PROTOCOL}://${SENTRY_BASE_URL}${req.path}`;
 		}
 	} else {
-		console.log(`unknown path: ${req.path}`);
-		return _sendStatus(res, 400);
+		throw new Error(`unknown path: ${req.path}`);
+		// return _sendStatus(res, 400);
 	}
 	if (!targeturl) {
-		console.log(`unknown project: ${req.path}`);
-		return _sendStatus(res, 400);
+		throw new Error(`unknown project: ${req.path}`);
+		// return _sendStatus(res, 400);
 	}
 	console.log(`Sending request to: ${targeturl}`);
 
 	const headers = req.headers;
 	console.log("sending headers: " + _dumpObject(Object.keys(headers)));
 
-	request.post({
+	// Send request
+	requests.post({
 		url: targeturl,
 		headers: headers,
 		body: req.body,
 		// rejectUnauthorized: false
 	}, (err, response, body) => {
 		if (err) {
-			console.log(`request.post error: ${err}`);
-			return res.status(403);
+			throw new Error(`request.post error: ${err}`);
+			//return res.status(403);
 		}
 
 		console.log(`Sentry response: ${response.statusCode} body: ${_dumpObject(body)}`);
@@ -409,5 +481,5 @@ app.post('*', async (req, res) => {
 	return res.end();
 });
 
-// http.createServer(app).listen(PORT);
+//http.createServer(app).listen(80);
 https.createServer(SERVER_OPTIONS, app).listen(PORT);
