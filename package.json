@@ -4,6 +4,7 @@
   "main": "index.js",
   "license": "MIT",
   "dependencies": {
+    "@sentry/node": "^7.91.0",
     "app-root-path": "^3.0.0",
     "axios": "^0.27.2",
     "batch": "^0.6.1",
