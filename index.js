@@ -97,12 +97,12 @@ app.use(morgan('dev')); // Get traffic logs
 Sentry.init({
 	dsn: "https://4d1f41a1bb21666f16d485330c21c11a@o920931.ingest.sentry.io/4505965966327808",
 	
-	integrations: [
-	  // enable HTTP calls tracing
-	  new Sentry.Integrations.Http({ tracing: true }),
-	  // enable Express.js middleware tracing
-	  new Sentry.Integrations.Express({ app }),
-	],
+	// integrations: [
+	//   // enable HTTP calls tracing
+	//   new Sentry.Integrations.Http({ tracing: true }),
+	//   // enable Express.js middleware tracing
+	//   new Sentry.Integrations.Express({ app }),
+	// ],
   
 	// Set tracesSampleRate to 1.0 to capture 100%
 	// of transactions for performance monitoring.
@@ -118,22 +118,22 @@ app.use(Sentry.Handlers.requestHandler());
 app.use(Sentry.Handlers.tracingHandler());	
 */
 // The error handler must be before any other error middleware and after all controllers
-app.use(Sentry.Handlers.errorHandler());
+// app.use(Sentry.Handlers.errorHandler());
 
 app.get('/operational', (req, res) => {
 	res.writeHead(200);
 	res.end();
 });
 
-app.use((req, res, next) => {
-//	/*
-    if (!req.secure) {
-		console.log("*** Redirecting to https...");
-		return res.redirect(['https://', req.get('Host'), req.url].join(''));
-	}
-//	*/
-    next();
-});
+// app.use((req, res, next) => {
+// //	/*
+//     if (!req.secure) {
+// 		console.log("*** Redirecting to https...");
+// 		return res.redirect(['https://', req.get('Host'), req.url].join(''));
+// 	}
+// //	*/
+//     next();
+// });
 
 // Do not allow GET requests
 app.get('*', (req, res) => {
@@ -481,5 +481,17 @@ app.post('*', async (req, res) => {
 	return res.end();
 });
 
-//http.createServer(app).listen(80);
-https.createServer(SERVER_OPTIONS, app).listen(PORT);
+// The error handler must be registered before any other error middleware and after all controllers
+Sentry.setupExpressErrorHandler(app);
+
+// Optional fallthrough error handler
+app.use(function onError(err, req, res, next) {
+  // The error id is attached to `res.sentry` to be returned
+  // and optionally displayed to the user for support.
+  console.log("Error: " + err.message);
+  res.statusCode = 500;
+  res.end(res.sentry + "\n");
+});
+
+http.createServer(app).listen(80);
+//https.createServer(SERVER_OPTIONS, app).listen(PORT);
